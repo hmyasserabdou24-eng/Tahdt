@@ -1,0 +1,104 @@
+name: TADAHHATH AI — Android CI & APK Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-android:
+    name: Analyze, Test & Build Android APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17 (Required for Android Gradle Plugin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Set up Flutter SDK (Stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Normalize Project Layout (Supports Single-Folder or Standard Layout)
+        shell: bash
+        run: |
+          set -e
+          # If files were uploaded inside TADAHHATH_AI_One_Folder/, move them to root first
+          if [ -d "TADAHHATH_AI_One_Folder" ] && [ ! -f "pubspec.yaml" ]; then
+            cp -r TADAHHATH_AI_One_Folder/* .
+            cp TADAHHATH_AI_One_Folder/.env.example . 2>/dev/null || true
+          fi
+
+          # If all .dart files are in the root folder (single-folder layout), organize them for Flutter build
+          if [ -f "main.dart" ] && [ ! -f "lib/main.dart" ]; then
+            echo "Detected single-folder layout. Organizing files for Flutter build..."
+            mkdir -p temp_backup
+            cp pubspec.yaml analysis_options.yaml temp_backup/
+            [ -f "AndroidManifest.xml" ] && cp AndroidManifest.xml temp_backup/
+            [ -f "app_icon.png" ] && cp *.png temp_backup/
+
+            # Generate missing Android/iOS platform runners safely
+            flutter create --org com.tadahhath --project-name tadahhath_ai --platforms=android .
+
+            # Restore project pubspec and analysis_options
+            cp temp_backup/pubspec.yaml ./pubspec.yaml
+            cp temp_backup/analysis_options.yaml ./analysis_options.yaml
+            [ -f "temp_backup/app_icon.png" ] && cp temp_backup/*.png ./
+
+            # Move application .dart files into lib/ and unit tests into test/
+            rm -rf lib/* test/*
+            mkdir -p lib test
+            for f in *.dart; do
+              if [[ "$f" == *_test.dart ]]; then
+                mv "$f" test/
+              else
+                mv "$f" lib/
+              fi
+            done
+
+            # Restore custom AndroidManifest.xml if present
+            if [ -f "temp_backup/AndroidManifest.xml" ]; then
+              cp temp_backup/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+            fi
+            rm -rf temp_backup
+          elif [ ! -d "android/app/src/main/kotlin" ] && [ ! -d "android/app/src/main/java" ]; then
+            echo "Generating Android platform runner files..."
+            cp pubspec.yaml pubspec.yaml.bak
+            [ -f "android/app/src/main/AndroidManifest.xml" ] && cp android/app/src/main/AndroidManifest.xml AndroidManifest.xml.bak
+            flutter create --org com.tadahhath --project-name tadahhath_ai --platforms=android .
+            mv pubspec.yaml.bak pubspec.yaml
+            [ -f "AndroidManifest.xml.bak" ] && mv AndroidManifest.xml.bak android/app/src/main/AndroidManifest.xml
+            rm -f test/widget_test.dart
+          fi
+
+      - name: Install Flutter Dependencies
+        run: flutter pub get
+
+      - name: Run Static Code Analysis
+        run: flutter analyze --no-fatal-infos
+
+      - name: Run Automated Unit Tests
+        run: flutter test
+
+      - name: Build Android Release APK
+        run: |
+          flutter build apk --release \
+            --dart-define=SUPABASE_URL=${{ secrets.SUPABASE_URL }} \
+            --dart-define=SUPABASE_ANON_KEY=${{ secrets.SUPABASE_ANON_KEY }} \
+            --dart-define=AUTH_REDIRECT_SCHEME=io.supabase.tadahhath
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TADAHHATH-AI-Android-Release-APK
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 30
